@@ -2684,6 +2684,7 @@ static const Property riscv_cpu_properties[] = {
      * it with -x and default to 'false'.
      */
     DEFINE_PROP_BOOL("x-misa-w", RISCVCPU, cfg.misa_w, false),
+    DEFINE_PROP_BOOL("g233", RISCVCPU, cfg.ext_g233, false),
 };
 
 static const gchar *riscv_gdb_arch_name(CPUState *cs)
@@ -3336,6 +3337,7 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .misa_mxl_max = MXL_RV64,
         .misa_ext = RVG | RVC | RVB | RVS | RVU | RVH | RVV,
         .priv_spec = PRIV_VERSION_1_13_0,
+        .cfg.ext_g233 = true,
         .cfg.ext_zicntr = true,
         .cfg.ext_zihpm = true,
         .cfg.ext_zihintntl = true,

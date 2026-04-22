@@ -779,5 +779,208 @@ void helper_ssamoswap_disabled(CPURISCVState *env)
 done:
     riscv_raise_exception(env, exception, GETPC());
 }
-
 #endif /* !CONFIG_USER_ONLY */
+
+/* G233 custom instruction helpers */
+void helper_dma_transpose(CPURISCVState *env, target_ulong rd_addr,
+                          target_ulong rs1_addr, target_ulong grain)
+{
+    static const int sizes[] = {8, 16, 32};
+    uint32_t *src_matrix, *dst_matrix;
+    int n, i, j;
+
+    if (grain > 2) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+        return;
+    }
+
+    n = sizes[grain];
+    src_matrix = g_new(uint32_t, n * n);
+    dst_matrix = g_new(uint32_t, n * n);
+
+    /* Read source matrix from memory */
+    for (i = 0; i < n * n; i++) {
+        src_matrix[i] = cpu_ldl_data_ra(env, rs1_addr + i * 4, GETPC());
+    }
+
+    /* Perform transpose: dst[j*N + i] = src[i*N + j] */
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < n; j++) {
+            dst_matrix[j * n + i] = src_matrix[i * n + j];
+        }
+    }
+
+    /* Write destination matrix to memory */
+    for (i = 0; i < n * n; i++) {
+        cpu_stl_data_ra(env, rd_addr + i * 4, dst_matrix[i], GETPC());
+    }
+
+    g_free(src_matrix);
+    g_free(dst_matrix);
+}
+
+void helper_g233_sort(CPURISCVState *env, target_ulong sort_len,
+                      target_ulong arr_addr, target_ulong arr_size)
+{
+    int32_t *arr = g_new(int32_t, arr_size);
+    int i, j;
+    int k = sort_len;
+    int n = arr_size;
+
+    if (k < 0 || n < 0 || k > n) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+        g_free(arr);
+        return;
+    }
+
+    for (i = 0; i < n; i++) {
+        arr[i] = (int32_t)cpu_ldl_data_ra(env, arr_addr + i * 4, GETPC());
+    }
+
+    for (i = 0; i < k - 1; i++) {
+        for (j = 0; j < k - i - 1; j++) {
+            if (arr[j] > arr[j + 1]) {
+                int32_t tmp = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
+            }
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        cpu_stl_data_ra(env, arr_addr + i * 4, (uint32_t)arr[i], GETPC());
+    }
+
+    g_free(arr);
+}
+
+void helper_g233_crush(CPURISCVState *env, target_ulong dst_addr,
+                       target_ulong src_addr, target_ulong n)
+{
+    int i;
+    int out_len = (n + 1) / 2;
+
+    for (i = 0; i < n / 2; i++) {
+        uint8_t low = cpu_ldub_data_ra(env, src_addr + 2 * i, GETPC()) & 0x0F;
+        uint8_t high = cpu_ldub_data_ra(env, src_addr + 2 * i + 1, GETPC()) & 0x0F;
+        cpu_stb_data_ra(env, dst_addr + i, low | (high << 4), GETPC());
+    }
+
+    if (n & 1) {
+        uint8_t low = cpu_ldub_data_ra(env, src_addr + n - 1, GETPC()) & 0x0F;
+        cpu_stb_data_ra(env, dst_addr + out_len - 1, low, GETPC());
+    }
+}
+
+void helper_g233_expand(CPURISCVState *env, target_ulong dst_addr,
+                        target_ulong src_addr, target_ulong n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        uint8_t val = cpu_ldub_data_ra(env, src_addr + i, GETPC());
+        cpu_stb_data_ra(env, dst_addr + 2 * i, val & 0x0F, GETPC());
+        cpu_stb_data_ra(env, dst_addr + 2 * i + 1, (val >> 4) & 0x0F, GETPC());
+    }
+}
+
+target_ulong helper_g233_vdot(CPURISCVState *env, target_ulong a_addr,
+                              target_ulong b_addr)
+{
+    int64_t acc = 0;
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        int32_t a = (int32_t)cpu_ldl_data_ra(env, a_addr + i * 4, GETPC());
+        int32_t b = (int32_t)cpu_ldl_data_ra(env, b_addr + i * 4, GETPC());
+        acc += (int64_t)a * (int64_t)b;
+    }
+
+    return (target_ulong)acc;
+}
+
+void helper_g233_vrelu(CPURISCVState *env, target_ulong dst_addr,
+                       target_ulong src_addr, target_ulong n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        int32_t val = (int32_t)cpu_ldl_data_ra(env, src_addr + i * 4, GETPC());
+        if (val < 0) {
+            val = 0;
+        }
+        cpu_stl_data_ra(env, dst_addr + i * 4, (uint32_t)val, GETPC());
+    }
+}
+
+void helper_g233_vscale(CPURISCVState *env, target_ulong dst_addr,
+                        target_ulong src_addr, target_ulong scale)
+{
+    int i;
+    int32_t s = (int32_t)scale;
+
+    for (i = 0; i < 16; i++) {
+        int32_t val = (int32_t)cpu_ldl_data_ra(env, src_addr + i * 4, GETPC());
+        int64_t prod = (int64_t)val * (int64_t)s;
+        cpu_stl_data_ra(env, dst_addr + i * 4, (uint32_t)(int32_t)prod, GETPC());
+    }
+}
+
+target_ulong helper_g233_vmax(CPURISCVState *env, target_ulong src_addr,
+                              target_ulong n)
+{
+    int32_t max;
+    int i;
+
+    if (n <= 0) {
+        return 0;
+    }
+
+    max = (int32_t)cpu_ldl_data_ra(env, src_addr, GETPC());
+    for (i = 1; i < n; i++) {
+        int32_t val = (int32_t)cpu_ldl_data_ra(env, src_addr + i * 4, GETPC());
+        if (val > max) {
+            max = val;
+        }
+    }
+
+    return (target_ulong)(int64_t)max;
+}
+
+void helper_g233_gemm(CPURISCVState *env, target_ulong c_addr,
+                      target_ulong a_addr, target_ulong b_addr)
+{
+    int32_t a[16], b[16], c[16];
+    int i, j, k;
+
+    for (i = 0; i < 16; i++) {
+        a[i] = (int32_t)cpu_ldl_data_ra(env, a_addr + i * 4, GETPC());
+        b[i] = (int32_t)cpu_ldl_data_ra(env, b_addr + i * 4, GETPC());
+    }
+
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            int64_t acc = 0;
+            for (k = 0; k < 4; k++) {
+                acc += (int64_t)a[i * 4 + k] * (int64_t)b[k * 4 + j];
+            }
+            c[i * 4 + j] = (int32_t)acc;
+        }
+    }
+
+    for (i = 0; i < 16; i++) {
+        cpu_stl_data_ra(env, c_addr + i * 4, (uint32_t)c[i], GETPC());
+    }
+}
+
+void helper_g233_vadd(CPURISCVState *env, target_ulong c_addr,
+                      target_ulong a_addr, target_ulong b_addr)
+{
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        uint32_t a = cpu_ldl_data_ra(env, a_addr + i * 4, GETPC());
+        uint32_t b = cpu_ldl_data_ra(env, b_addr + i * 4, GETPC());
+        cpu_stl_data_ra(env, c_addr + i * 4, a + b, GETPC());
+    }
+}
